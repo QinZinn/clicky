@@ -17,6 +17,7 @@ use tokio::sync::mpsc::UnboundedSender;
 
 use crate::audio::AudioLevel;
 use crate::config::{HotkeyChoice, Settings, SttProvider};
+use crate::docs::DocSource;
 use crate::engine::{self, Command, EngineDependencies, UiEvent, VoiceState};
 use crate::input::{self, HotkeyEvent, SharedHotkeyChoice};
 use crate::llm::ModelInfo;
@@ -45,12 +46,25 @@ pub enum ChatRole {
     Assistant,
     Notice,
     Error,
+    /// The documentation pages an answer was based on.
+    Sources,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ChatEntry {
     pub role: ChatRole,
     pub text: String,
+    /// Pages to link to (only for [`ChatRole::Sources`]).
+    pub links: Vec<DocSource>,
+}
+
+/// The state of the "Test search" button on the Docs settings tab.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum DocsTestState {
+    #[default]
+    NotRun,
+    Running,
+    Finished(Result<String, String>),
 }
 
 /// Models fetched from a provider, per provider id.
@@ -92,6 +106,7 @@ pub struct ClickyApp {
     pub(crate) model_filter: String,
     pub(crate) settings_tab: settings_ui::SettingsTab,
     pub(crate) settings_message: Option<(bool, String)>,
+    pub(crate) docs_test: DocsTestState,
     pub(crate) hotkey: SharedHotkeyChoice,
     pub(crate) hotkey_error: Option<String>,
 
@@ -129,6 +144,7 @@ impl ClickyApp {
             model_filter: String::new(),
             settings_tab: settings_ui::SettingsTab::Provider,
             settings_message: None,
+            docs_test: DocsTestState::NotRun,
             hotkey: parts.hotkey,
             hotkey_error: parts.hotkey_error,
             events: parts.events,
@@ -256,7 +272,15 @@ impl ClickyApp {
     }
 
     fn push_message(&mut self, role: ChatRole, text: String) {
-        self.messages.push(ChatEntry { role, text });
+        self.push_entry(ChatEntry {
+            role,
+            text,
+            links: Vec::new(),
+        });
+    }
+
+    fn push_entry(&mut self, entry: ChatEntry) {
+        self.messages.push(entry);
         if self.messages.len() > MAXIMUM_MESSAGES {
             let excess = self.messages.len() - MAXIMUM_MESSAGES;
             self.messages.drain(..excess);
@@ -290,6 +314,14 @@ impl ClickyApp {
                         self.now_seconds(),
                     ));
                 }
+            }
+            UiEvent::Sources { query, sources } => self.push_entry(ChatEntry {
+                role: ChatRole::Sources,
+                text: format!("Looked up the docs for \"{query}\":"),
+                links: sources,
+            }),
+            UiEvent::DocsSearchTested(result) => {
+                self.docs_test = DocsTestState::Finished(result);
             }
             UiEvent::Models {
                 provider_id,
@@ -350,6 +382,32 @@ impl ClickyApp {
         }
     }
 
+    /// The quick "Look up docs" switch in the chat window. Applies at once and is
+    /// remembered, unlike the other settings, which wait for Save.
+    pub(crate) fn set_docs_enabled(&mut self, enabled: bool) {
+        self.settings.docs.enabled = enabled;
+        self.draft.docs.enabled = enabled;
+        let _ = self
+            .commands
+            .send(Command::UpdateSettings(Box::new(self.settings.clone())));
+        if let Some(path) = &self.config_path
+            && let Err(error) = self.settings.save_to(path)
+        {
+            self.push_message(
+                ChatRole::Notice,
+                format!("This choice is active now but could not be saved: {error}"),
+            );
+        }
+    }
+
+    /// The "Test search" button: one real search with the settings as edited.
+    pub(crate) fn request_docs_search_test(&mut self) {
+        self.docs_test = DocsTestState::Running;
+        let _ = self
+            .commands
+            .send(Command::TestDocsSearch(Box::new(self.draft.clone())));
+    }
+
     pub(crate) fn request_model_refresh(&mut self) {
         let provider_id = self.draft.active_provider.clone();
         let config = self.draft.active_provider_config();
@@ -401,6 +459,7 @@ impl ClickyApp {
                         VoiceState::Idle => ("Ready", palette::MUTED),
                         VoiceState::Listening => ("Listening", palette::DANGER),
                         VoiceState::Transcribing => ("Transcribing", palette::ACCENT_TEXT),
+                        VoiceState::LookingUpDocs => ("Looking up docs", palette::ACCENT_TEXT),
                         VoiceState::Thinking => ("Thinking", palette::ACCENT_TEXT),
                         VoiceState::Speaking => ("Speaking", palette::SUCCESS),
                     };
@@ -486,6 +545,20 @@ impl ClickyApp {
                         let _ = self.commands.send(Command::Cancel);
                     }
                 });
+
+                ui.add_space(4.0);
+                let mut docs_enabled = self.settings.docs.enabled;
+                let docs_toggle = ui
+                    .checkbox(&mut docs_enabled, "Look up docs")
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(
+                        "Before answering, search the web for the software's real documentation and \
+                         read it, instead of relying on the model's memory. Sends a short search query \
+                         to your chosen search service. Set it up in Settings > Docs.",
+                    );
+                if docs_toggle.changed() {
+                    self.set_docs_enabled(docs_enabled);
+                }
 
                 if self.state == VoiceState::Listening {
                     ui.add_space(6.0);
@@ -586,11 +659,11 @@ impl ClickyApp {
                             self.empty_state(ui);
                         }
                         for entry in &self.messages {
-                            message_bubble(ui, entry.role, &entry.text);
+                            message_bubble(ui, entry.role, &entry.text, &entry.links);
                             ui.add_space(8.0);
                         }
                         if let Some(text) = &self.streaming_reply {
-                            message_bubble(ui, ChatRole::Assistant, &format!("{text} …"));
+                            message_bubble(ui, ChatRole::Assistant, &format!("{text} …"), &[]);
                         } else if matches!(
                             self.state,
                             VoiceState::Thinking | VoiceState::Transcribing
@@ -657,11 +730,12 @@ fn needs_setup(settings: &Settings) -> bool {
     needs_key && settings.active_api_key().is_empty()
 }
 
-fn message_bubble(ui: &mut egui::Ui, role: ChatRole, text: &str) {
+fn message_bubble(ui: &mut egui::Ui, role: ChatRole, text: &str, links: &[DocSource]) {
     let (title, fill, text_color) = match role {
         ChatRole::User => ("You", palette::ACCENT, Color32::WHITE),
         ChatRole::Assistant => ("Clicky", palette::CARD, palette::TEXT),
         ChatRole::Notice => ("", Color32::TRANSPARENT, palette::MUTED),
+        ChatRole::Sources => ("Docs", Color32::from_rgb(0x14, 0x24, 0x3d), palette::TEXT),
         ChatRole::Error => (
             "Problem",
             Color32::from_rgb(0x3b, 0x1a, 0x1d),
@@ -686,6 +760,16 @@ fn message_bubble(ui: &mut egui::Ui, role: ChatRole, text: &str) {
                 rich = rich.italics().small();
             }
             ui.add(egui::Label::new(rich).selectable(true));
+            for link in links {
+                let shown: String = if link.title.chars().count() > 80 {
+                    format!("{}…", link.title.chars().take(80).collect::<String>())
+                } else {
+                    link.title.clone()
+                };
+                ui.hyperlink_to(shown, &link.url)
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .on_hover_text(&link.url);
+            }
         });
 }
 

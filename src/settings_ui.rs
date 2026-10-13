@@ -2,8 +2,8 @@
 
 use eframe::egui::{self, RichText, TextEdit};
 
-use crate::app::{ClickyApp, ModelList, palette};
-use crate::config::{ApiStyle, HotkeyChoice, Secret, SttProvider, TtsProvider};
+use crate::app::{ClickyApp, DocsTestState, ModelList, palette};
+use crate::config::{ApiStyle, DocsSearchBackend, HotkeyChoice, Secret, SttProvider, TtsProvider};
 use crate::engine::Command;
 use crate::providers;
 
@@ -11,13 +11,15 @@ use crate::providers;
 pub enum SettingsTab {
     Provider,
     Voice,
+    Docs,
     General,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 3] = [
+    const ALL: [SettingsTab; 4] = [
         SettingsTab::Provider,
         SettingsTab::Voice,
+        SettingsTab::Docs,
         SettingsTab::General,
     ];
 
@@ -25,6 +27,7 @@ impl SettingsTab {
         match self {
             SettingsTab::Provider => "AI model",
             SettingsTab::Voice => "Voice",
+            SettingsTab::Docs => "Docs",
             SettingsTab::General => "General",
         }
     }
@@ -86,6 +89,7 @@ pub fn show(app: &mut ClickyApp, ui: &mut egui::Ui) {
                 .show(ui, |ui| match app.settings_tab {
                     SettingsTab::Provider => provider_tab(app, ui),
                     SettingsTab::Voice => voice_tab(app, ui),
+                    SettingsTab::Docs => docs_tab(app, ui),
                     SettingsTab::General => general_tab(app, ui),
                 });
         });
@@ -485,4 +489,101 @@ fn general_tab(app: &mut ClickyApp, ui: &mut egui::Ui) {
             .selectable(true),
         );
     }
+}
+
+fn docs_tab(app: &mut ClickyApp, ui: &mut egui::Ui) {
+    ui.checkbox(
+        &mut app.draft.docs.enabled,
+        "Look up documentation before answering",
+    );
+    note(
+        ui,
+        "Models often remember menus and settings wrongly or out of date. With this on, Clicky first \
+         asks the model whether your question is about specific software. If so, it searches for the \
+         official docs, reads the best pages, and gives them to the model along with your question. \
+         It costs one extra short model call and a few seconds, and works with every provider.",
+    );
+    ui.add_space(8.0);
+
+    {
+        let docs = &mut app.draft.docs;
+        field(ui, "Search service", |ui, label| {
+            egui::ComboBox::from_id_salt("docs_backend_combo")
+                .width(ui.available_width())
+                .selected_text(docs.backend.label())
+                .show_ui(ui, |ui| {
+                    for backend in DocsSearchBackend::ALL {
+                        ui.selectable_value(&mut docs.backend, backend, backend.label());
+                    }
+                })
+                .response
+                .labelled_by(label);
+        });
+        match docs.backend {
+            DocsSearchBackend::DuckDuckGo => note(
+                ui,
+                "No setup, but DuckDuckGo blocks automated searches from some networks with a CAPTCHA. \
+                 If Test search fails, switch to Brave Search or your own SearXNG server.",
+            ),
+            DocsSearchBackend::Brave => field(ui, "Brave Search API key", |ui, label| {
+                secret_field(ui, &mut docs.brave_api_key, "Paste your key", label);
+                note(
+                    ui,
+                    "Get a key at brave.com/search/api (there is a free tier). Or set BRAVE_API_KEY.",
+                );
+            }),
+            DocsSearchBackend::SearxNg => field(ui, "SearXNG address", |ui, label| {
+                text_field(ui, &mut docs.searxng_url, "http://localhost:8080", label);
+                note(
+                    ui,
+                    "Your own SearXNG server, with the json format enabled under search.formats in its \
+                     settings.yml. Public servers do not allow this.",
+                );
+            }),
+        }
+        field(ui, "Pages to read per question", |ui, label| {
+            ui.add(egui::DragValue::new(&mut docs.max_pages).range(1..=5))
+                .labelled_by(label);
+        });
+    }
+
+    let mut run_test = false;
+    ui.horizontal(|ui| {
+        if ui
+            .button("Test search")
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            run_test = true;
+        }
+        match &app.docs_test {
+            DocsTestState::NotRun => {}
+            DocsTestState::Running => {
+                ui.spinner();
+            }
+            DocsTestState::Finished(Ok(message)) => {
+                ui.label(RichText::new(message).small().color(palette::SUCCESS));
+            }
+            DocsTestState::Finished(Err(message)) => {
+                ui.label(RichText::new(message).small().color(palette::DANGER));
+            }
+        }
+    });
+    if run_test {
+        app.request_docs_search_test();
+    }
+
+    ui.add_space(12.0);
+    ui.separator();
+    ui.add_space(6.0);
+    ui.label(RichText::new("What leaves your computer").strong());
+    note(
+        ui,
+        "A short search query goes to the search service. The model writes it from your question and \
+         screen, and Clicky removes web addresses, e-mail addresses, long numbers, file paths and \
+         search operators from it first. The pages are then downloaded straight from their websites \
+         (only https pages on public addresses are read), and their text goes to your AI provider \
+         together with your question. Web page text is treated as untrusted: the model is told never \
+         to follow instructions found in it.",
+    );
 }

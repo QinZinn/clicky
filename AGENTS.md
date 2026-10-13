@@ -12,6 +12,7 @@ It started as a macOS-only Swift menu bar app (`farzaa/clicky`). It was rewritte
 - **Async runtime**: `tokio` (multi-thread). The UI thread never blocks; it talks to the engine over channels.
 - **Engine** (`engine.rs`): one async task owning the conversation. Receives `Command`s (start/stop listening, send text, cancel, update settings, refresh models), runs a *turn* as a cancellable task, and reports `UiEvent`s. All hardware (screen capture, speakers) is injected, so a whole turn is testable without any.
 - **LLM layer** (`llm.rs`, `providers.rs`, `sse.rs`): one streaming client for three wire formats: OpenAI chat completions, OpenAI responses, Anthropic messages. Presets for Anthropic, OpenAI, OpenRouter, OpenCode Zen, DeepSeek, Gemini, Groq, Ollama, LM Studio and a custom OpenAI-compatible server. OpenCode Zen serves different model families on different endpoints, so the format is chosen per model (`providers::zen_wire_format`). If a model rejects images, the request is retried once without them.
+- **Docs lookup** (`docs/`): optional, off by default. `planner.rs` makes one short model call (same provider, only the focus screen) that returns `NONE` or `SEARCH: <query>`; the query is filtered for private-looking words. `search.rs` queries DuckDuckGo (best effort, CAPTCHA detected), Brave or a self-hosted SearXNG. `mod.rs` ranks results toward real documentation, downloads the best pages concurrently (stopping once enough are read, with a time cap) and falls back to search snippets. `fetch.rs` is the safety boundary (below). `extract.rs` turns HTML into readable text. The engine attaches the result to the question behind a per-request nonce fence and appends `DOCS_SYSTEM_PROMPT_ADDENDUM` to the system prompt. History keeps the plain question, never the page text.
 - **Speech in** (`stt.rs`, `audio.rs`): `cpal` microphone capture, converted to 16 kHz mono PCM16 in 100 ms chunks. AssemblyAI v3 streaming over a websocket (token fetched with the user's key), or an upload to any OpenAI-compatible `/audio/transcriptions`.
 - **Speech out** (`tts.rs`, `playback.rs`): ElevenLabs, played with `rodio` on a dedicated audio thread.
 - **Screens** (`screen.rs`): `xcap` captures every monitor, downscaled to at most 1280 px and JPEG-encoded. Each image gets a caption with its exact pixel size, because the model answers pointing requests in that pixel space.
@@ -24,6 +25,8 @@ It started as a macOS-only Swift menu bar app (`farzaa/clicky`). It was rewritte
 - **Direct provider calls, no proxy.** The old Cloudflare Worker existed so keys would not ship in a distributed binary. A desktop app that asks the user for their own key does not need it, and an unauthenticated proxy was an open door to the owner's credits.
 - **Push-to-talk lasts until the mouse button is released.** egui forgets a "pressed" widget after ~0.8 s, so the on-screen talk button tracks the global pointer state instead (`ClickyApp::talk_button`). A regression test covers it.
 - **Polling, not hooks, for the shortcut.** Works while other apps have focus, with no event-loop plumbing.
+- **The docs fetcher treats search results as hostile.** Clicky requests URLs found on the open internet from the user's own machine, so `docs/fetch.rs` allows only `https://` on port 443 to public addresses, rejects internal-looking names and credentials, re-checks every redirect hop, filters DNS answers to public addresses, and caps body size and content types. Tests prove a redirect into an internal service is never contacted. `UrlPolicy::with_exception` exists only so tests can reach loopback mocks; never add exceptions in app code.
+- **Retrieved page text is untrusted data.** It goes in a nonce-fenced block, `<<<` and `>>>` are defanged, and the system prompt says never to follow instructions inside it.
 - **TLS roots come from the OS** (`rustls-tls-native-roots`), so corporate/inspection CAs work.
 
 ## Key Files
@@ -31,13 +34,13 @@ It started as a macOS-only Swift menu bar app (`farzaa/clicky`). It was rewritte
 | File | Lines | Purpose |
 |------|-------|---------|
 | `src/main.rs` | ~140 | Entry point: window options, generated icon, starts `ClickyApp`. |
-| `src/app.rs` | ~740 | The main window: chat, input bar, hold-to-talk button, pointer overlay window. Built from injectable `AppParts` so tests can drive it headlessly. |
-| `src/settings_ui.rs` | ~490 | Settings screen (AI model / Voice / General). Captions are linked to inputs with `labelled_by`. |
-| `src/engine.rs` | ~440 | Command loop and the turn pipeline. |
+| `src/app.rs` | ~820 | The main window: chat, input bar, hold-to-talk button, pointer overlay window. Built from injectable `AppParts` so tests can drive it headlessly. |
+| `src/settings_ui.rs` | ~590 | Settings screen (AI model / Voice / Docs / General). Captions are linked to inputs with `labelled_by`. |
+| `src/engine.rs` | ~600 | Command loop and the turn pipeline. |
 | `src/llm.rs` | ~860 | Request builders, streaming decoder, text-only retry, model-list parsing. |
 | `src/providers.rs` | ~420 | Provider presets, wire-format resolution (incl. Zen routing), URL helpers, plain-http warning. |
 | `src/sse.rs` | ~150 | Server-Sent Events decoder (handles chunks split mid-character). |
-| `src/config.rs` | ~490 | Settings types, `Secret`, load/save, environment-variable fallbacks. |
+| `src/config.rs` | ~560 | Settings types, `Secret`, load/save, environment-variable fallbacks. |
 | `src/stt.rs` | ~720 | `Recording`, AssemblyAI session and transcript assembly, Whisper-style upload. |
 | `src/audio.rs` | ~480 | Microphone capture thread, resampler, PCM16 and WAV helpers. |
 | `src/tts.rs` | ~120 | ElevenLabs client. |
@@ -47,14 +50,19 @@ It started as a macOS-only Swift menu bar app (`farzaa/clicky`). It was rewritte
 | `src/pointing.rs` | ~210 | `[POINT:...]` parsing and streaming-safe display text. |
 | `src/geometry.rs` | ~130 | `Point`, `Rect`, screenshot-pixel to desktop mapping. |
 | `src/overlay.rs` | ~585 | Pointer flight animation (pure) and its painter. |
+| `src/docs/mod.rs` | ~510 | Docs lookup pipeline: ranking, concurrent page reads with early exit, snippet fallback, the fenced reference block. |
+| `src/docs/fetch.rs` | ~530 | The safe page fetcher: URL policy, public-address resolver, redirect checks, size and type caps. |
+| `src/docs/extract.rs` | ~480 | HTML to readable text (main content, headings, lists, tables, code). |
+| `src/docs/search.rs` | ~510 | DuckDuckGo, Brave and SearXNG backends and their parsers. |
+| `src/docs/planner.rs` | ~310 | The "does this need docs, and what to search" call, the query privacy filter, the docs prompt addendum. |
 | `src/prompt.rs` | ~35 | The system prompt. |
-| `examples/mock_provider.rs` | ~105 | A fake provider to try the whole app without API keys. |
-| `tests/` | ~2400 | Mock-server, engine pipeline, headless UI and X11 display tests. |
+| `examples/mock_provider.rs` | ~170 | A fake provider (model, planner and SearXNG) to try the whole app, docs lookup included, without API keys. |
+| `tests/` | ~4000 | Mock-server, engine pipeline, headless UI and X11 display tests. |
 
 ## Build & Run
 
 ```bash
-cargo run --release          # the app
+cargo run --release          # the app (Rust 1.95 or newer: the GUI toolkit requires it)
 cargo run --example mock_provider   # fake provider on 127.0.0.1:8787, no keys needed
 ```
 
@@ -70,7 +78,8 @@ cargo fmt
 ```
 
 - Unit tests live next to the code. `tests/llm_mock_server.rs`, `stt_mock_server.rs` and `tts_mock_server.rs` run the real clients against local mock servers (including a mock AssemblyAI websocket).
-- `tests/engine_pipeline.rs` drives the real engine end to end: only the screen and speakers are fakes.
+- `tests/engine_pipeline.rs` drives the real engine end to end: only the screen and speakers are fakes. It covers the docs lookup too (planner, search, page fetch, grounded answer, every failure path).
+- `tests/docs_mock_server.rs` tests the search backends, the fetcher's safety checks (blocked addresses, redirects into an internal service, oversized and non-text bodies, a hanging site) and the pipeline against local mock servers.
 - `tests/ui_interaction.rs` uses `egui_kittest` to click, type and hold-to-talk in the real widgets, headlessly.
 - `tests/display_integration.rs` skips itself without `DISPLAY`; under `xvfb-run` it captures a real screen and checks the shortcut with real key events (`xdotool`).
 - When you fix a bug, add a regression test, then check it fails against the old behavior.
@@ -101,6 +110,7 @@ IMPORTANT: Follow these naming rules strictly. Clarity is the top priority.
 - Do not add features, refactor code, or make "improvements" beyond what was asked
 - Do not add telemetry, analytics or any network call the user did not configure
 - Do not add a proxy server that holds keys; keys belong to the user
+- Do not fetch a URL from outside `docs::fetch` (it is the one place that enforces the URL policy), and do not put retrieved page text anywhere outside the nonce-fenced block
 - Do not leave `cargo clippy --all-targets` warnings
 
 ## Git Workflow

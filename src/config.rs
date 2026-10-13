@@ -238,6 +238,63 @@ impl HotkeyChoice {
     }
 }
 
+/// Where documentation searches are sent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DocsSearchBackend {
+    /// No key needed, but DuckDuckGo blocks automated searches from some
+    /// networks with a CAPTCHA, so this is best effort.
+    #[default]
+    DuckDuckGo,
+    /// Brave Search API. Needs a key (there is a free tier).
+    Brave,
+    /// A SearXNG server you run yourself, with its JSON output enabled.
+    SearxNg,
+}
+
+impl DocsSearchBackend {
+    pub const ALL: [DocsSearchBackend; 3] = [
+        DocsSearchBackend::DuckDuckGo,
+        DocsSearchBackend::Brave,
+        DocsSearchBackend::SearxNg,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            DocsSearchBackend::DuckDuckGo => "DuckDuckGo (no key, best effort)",
+            DocsSearchBackend::Brave => "Brave Search (API key)",
+            DocsSearchBackend::SearxNg => "SearXNG (your own server)",
+        }
+    }
+}
+
+/// Settings for looking up real documentation before answering.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DocsSettings {
+    /// Off by default: it adds a model call and a web search to every question,
+    /// and sends a short search query to the search service.
+    pub enabled: bool,
+    pub backend: DocsSearchBackend,
+    pub brave_api_key: Secret,
+    /// Base URL of your SearXNG server, e.g. `http://localhost:8080`.
+    pub searxng_url: String,
+    /// How many pages to read and give the model (1 to 5).
+    pub max_pages: u8,
+}
+
+impl Default for DocsSettings {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            backend: DocsSearchBackend::default(),
+            brave_api_key: Secret::default(),
+            searxng_url: "http://localhost:8080".to_string(),
+            max_pages: 3,
+        }
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -249,6 +306,7 @@ pub struct Settings {
     pub request_timeout_secs: u64,
     pub stt: SttSettings,
     pub tts: TtsSettings,
+    pub docs: DocsSettings,
     pub hotkey: HotkeyChoice,
     /// Fly a blue cursor to UI elements the model points at.
     pub show_pointer_overlay: bool,
@@ -264,6 +322,7 @@ impl Default for Settings {
             request_timeout_secs: 90,
             stt: SttSettings::default(),
             tts: TtsSettings::default(),
+            docs: DocsSettings::default(),
             hotkey: HotkeyChoice::default(),
             show_pointer_overlay: true,
         };
@@ -320,6 +379,13 @@ impl Settings {
 
     pub fn elevenlabs_api_key(&self) -> String {
         resolve_secret(&self.tts.elevenlabs_api_key, &["ELEVENLABS_API_KEY"])
+    }
+
+    pub fn brave_api_key(&self) -> String {
+        resolve_secret(
+            &self.docs.brave_api_key,
+            &["BRAVE_API_KEY", "BRAVE_SEARCH_API_KEY"],
+        )
     }
 
     /// Default location: `<config dir>/clicky/config.json`. The

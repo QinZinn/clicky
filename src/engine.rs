@@ -13,6 +13,10 @@ use tokio::task::JoinHandle;
 
 use crate::audio::AudioLevel;
 use crate::config::{Settings, TtsProvider};
+use crate::docs::fetch::UrlPolicy;
+use crate::docs::planner::{self, DOCS_SYSTEM_PROMPT_ADDENDUM, PlannerDecision};
+use crate::docs::search::SearchEndpoints;
+use crate::docs::{self, DocSource, DocsBundle, DocsClients};
 use crate::geometry::{self, Point, Rect};
 use crate::llm::{self, ChatImage, ChatInput, Exchange, LlmTarget, ModelInfo};
 use crate::playback::SpeechPlayer;
@@ -30,6 +34,8 @@ pub enum VoiceState {
     Listening,
     /// Waiting for the final transcript.
     Transcribing,
+    /// Searching for and reading documentation.
+    LookingUpDocs,
     /// Waiting for the model.
     Thinking,
     /// Reading the reply aloud.
@@ -59,6 +65,13 @@ pub enum UiEvent {
     Notice(String),
     Error(String),
     PointAt(PointRequest),
+    /// The documentation pages the answer is based on.
+    Sources {
+        query: String,
+        sources: Vec<DocSource>,
+    },
+    /// Outcome of the "Test search" button: a summary, or the reason it failed.
+    DocsSearchTested(Result<String, String>),
     Models {
         provider_id: String,
         result: Result<Vec<ModelInfo>, String>,
@@ -74,6 +87,8 @@ pub enum Command {
     Cancel,
     ClearConversation,
     UpdateSettings(Box<Settings>),
+    /// Run one search with the given (possibly unsaved) docs settings.
+    TestDocsSearch(Box<Settings>),
     RefreshModels {
         provider_id: String,
         base_url: String,
@@ -91,6 +106,10 @@ pub struct EngineDependencies {
     pub capture_screens: ScreenCaptureFunction,
     pub player: Arc<dyn SpeechPlayer>,
     pub tts_base_url: String,
+    /// Where the hosted search backends live.
+    pub search_endpoints: SearchEndpoints,
+    /// Which pages the docs lookup may fetch. Strict except in tests.
+    pub url_policy: UrlPolicy,
 }
 
 impl EngineDependencies {
@@ -100,6 +119,8 @@ impl EngineDependencies {
             capture_screens: Arc::new(screen::capture_all_screens),
             player: Arc::new(crate::playback::RodioSpeechPlayer::new()),
             tts_base_url: tts::ELEVENLABS_BASE_URL.to_string(),
+            search_endpoints: SearchEndpoints::default(),
+            url_policy: UrlPolicy::strict(),
         }
     }
 }
@@ -110,6 +131,7 @@ pub struct TurnContext {
     pub settings: Arc<Settings>,
     pub http: reqwest::Client,
     pub dependencies: EngineDependencies,
+    pub docs: DocsClients,
     pub events: EventSink,
     pub history: Arc<Mutex<Vec<Exchange>>>,
 }
@@ -156,10 +178,41 @@ pub async fn run_turn(context: TurnContext, user_text: String) {
         })
         .collect();
     let history_snapshot: Vec<Exchange> = context.history.lock().expect("history lock").clone();
+
+    // Optionally ground the answer in real documentation. The history keeps the
+    // user's plain question; only this request carries the reference excerpts.
+    let mut system_prompt = COMPANION_SYSTEM_PROMPT.to_string();
+    let mut question_for_model = user_text.clone();
+    if settings.docs.enabled {
+        match look_up_docs(
+            &context,
+            &target,
+            &history_snapshot,
+            &screenshots,
+            &user_text,
+        )
+        .await
+        {
+            DocsOutcome::Found(bundle) => {
+                events(UiEvent::Sources {
+                    query: bundle.query.clone(),
+                    sources: bundle.sources(),
+                });
+                question_for_model = bundle.augment_user_text(&user_text, &docs::make_nonce());
+                system_prompt.push_str(DOCS_SYSTEM_PROMPT_ADDENDUM);
+            }
+            DocsOutcome::NotNeeded => {}
+            DocsOutcome::Failed(reason) => events(UiEvent::Notice(format!(
+                "I couldn't look up the docs ({reason}), so this answer is from memory."
+            ))),
+        }
+        events(UiEvent::StateChanged(VoiceState::Thinking));
+    }
+
     let input = ChatInput {
-        system_prompt: COMPANION_SYSTEM_PROMPT,
+        system_prompt: &system_prompt,
         history: &history_snapshot,
-        user_text: &user_text,
+        user_text: &question_for_model,
         images: &images,
     };
 
@@ -233,6 +286,66 @@ pub async fn run_turn(context: TurnContext, user_text: String) {
     events(UiEvent::StateChanged(VoiceState::Idle));
 }
 
+/// The most time a docs lookup (planning call, search, page fetches) may take
+/// before the answer goes ahead without it.
+const DOCS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(45);
+
+enum DocsOutcome {
+    Found(DocsBundle),
+    /// The model judged the question did not need documentation.
+    NotNeeded,
+    Failed(String),
+}
+
+/// Asks the model whether the question needs documentation and, if so, finds
+/// and reads it. Never fails the turn: the caller answers without docs.
+async fn look_up_docs(
+    context: &TurnContext,
+    target: &LlmTarget,
+    history: &[Exchange],
+    screenshots: &[Screenshot],
+    user_text: &str,
+) -> DocsOutcome {
+    (context.events)(UiEvent::StateChanged(VoiceState::LookingUpDocs));
+
+    // The planner only needs to know which app the user is in: the focus screen.
+    let focus_image = screenshots
+        .iter()
+        .find(|screenshot| screenshot.is_cursor_screen)
+        .or_else(|| screenshots.first())
+        .map(|screenshot| ChatImage {
+            jpeg: screenshot.jpeg.clone(),
+            label: screenshot.label.clone(),
+        });
+
+    let lookup = async {
+        let decision = planner::decide(
+            &context.http,
+            target,
+            history,
+            user_text,
+            focus_image.as_ref(),
+        )
+        .await
+        .map_err(|error| format!("the planning step failed: {error}"))?;
+        match decision {
+            PlannerDecision::NoLookup => Ok(None),
+            PlannerDecision::Search(query) => {
+                docs::lookup_docs(&context.docs, &context.settings, &query)
+                    .await
+                    .map(Some)
+                    .map_err(|error| error.to_string())
+            }
+        }
+    };
+    match tokio::time::timeout(DOCS_LOOKUP_TIMEOUT, lookup).await {
+        Ok(Ok(Some(bundle))) => DocsOutcome::Found(bundle),
+        Ok(Ok(None)) => DocsOutcome::NotNeeded,
+        Ok(Err(reason)) => DocsOutcome::Failed(reason),
+        Err(_) => DocsOutcome::Failed("it took too long".to_string()),
+    }
+}
+
 async fn speak(context: &TurnContext, text: &str) {
     let events = &context.events;
     let settings = &context.settings;
@@ -281,6 +394,7 @@ struct Engine {
     events: EventSink,
     audio_level: AudioLevel,
     history: Arc<Mutex<Vec<Exchange>>>,
+    docs_clients: DocsClients,
     recording: Option<Recording>,
     turn_task: Option<JoinHandle<()>>,
 }
@@ -294,13 +408,20 @@ pub fn spawn_engine(
     audio_level: AudioLevel,
 ) -> UnboundedSender<Command> {
     let (command_sender, command_receiver) = unbounded_channel();
+    let http = llm::build_http_client(&settings);
+    let docs_clients = DocsClients::new(
+        http.clone(),
+        dependencies.search_endpoints.clone(),
+        dependencies.url_policy.clone(),
+    );
     let engine = Engine {
-        http: llm::build_http_client(&settings),
+        http,
         settings: Arc::new(settings),
         dependencies,
         events,
         audio_level,
         history: Arc::new(Mutex::new(Vec::new())),
+        docs_clients,
         recording: None,
         turn_task: None,
     };
@@ -329,8 +450,10 @@ impl Engine {
                 Command::ClearConversation => self.history.lock().expect("history lock").clear(),
                 Command::UpdateSettings(settings) => {
                     self.http = llm::build_http_client(&settings);
+                    self.docs_clients.search_http = self.http.clone();
                     self.settings = Arc::new(*settings);
                 }
+                Command::TestDocsSearch(settings) => self.test_docs_search(*settings),
                 Command::RefreshModels {
                     provider_id,
                     base_url,
@@ -357,6 +480,7 @@ impl Engine {
             settings: Arc::clone(&self.settings),
             http: self.http.clone(),
             dependencies: self.dependencies.clone(),
+            docs: self.docs_clients.clone(),
             events: Arc::clone(&self.events),
             history: Arc::clone(&self.history),
         }
@@ -421,6 +545,33 @@ impl Engine {
                 Err(error) => report_error(&events, error.to_string()),
             }
         }));
+    }
+
+    /// Runs one real search with the given docs settings, so the user can check
+    /// that a backend (and its key or address) works before relying on it.
+    fn test_docs_search(&self, settings: Settings) {
+        let clients = self.docs_clients.clone();
+        let events = Arc::clone(&self.events);
+        tokio::spawn(async move {
+            let outcome = docs::search::search(
+                &clients.search_http,
+                &clients.endpoints,
+                &settings.docs,
+                &settings.brave_api_key(),
+                "rust programming language documentation",
+            )
+            .await
+            .map_err(|error| error.to_string())
+            .and_then(|results| match results.first() {
+                Some(first) => Ok(format!(
+                    "Works: {} results, the first is \"{}\".",
+                    results.len(),
+                    first.title
+                )),
+                None => Err("The search worked but returned no results.".to_string()),
+            });
+            events(UiEvent::DocsSearchTested(outcome));
+        });
     }
 
     fn refresh_models(&self, provider_id: String, base_url: String, api_key: String) {

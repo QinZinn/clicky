@@ -7,6 +7,7 @@ use std::path::PathBuf;
 use clicky::app::{AppParts, ChatRole, ClickyApp, Screen};
 use clicky::audio::AudioLevel;
 use clicky::config::{ApiStyle, Secret, Settings, SttProvider};
+use clicky::docs::DocSource;
 use clicky::engine::{Command, UiEvent, VoiceState};
 use clicky::input::SharedHotkeyChoice;
 use clicky::llm::ModelInfo;
@@ -617,4 +618,198 @@ fn an_unencrypted_remote_address_gets_a_warning_but_local_ones_do_not() {
             .query_by_label_contains("sent unencrypted")
             .is_none()
     );
+}
+
+// ---------------------------------------------------------------------------
+// Looking up documentation
+// ---------------------------------------------------------------------------
+
+#[test]
+fn the_look_up_docs_switch_applies_at_once_and_is_remembered() {
+    let path = temporary_config_path("docs-toggle");
+    let mut fixture = fixture(configured_settings(), Some(path.clone()));
+    assert!(!fixture.app().settings().docs.enabled, "off by default");
+
+    fixture.click("Look up docs");
+
+    assert!(fixture.app().settings().docs.enabled);
+    assert!(
+        fixture.app().draft().docs.enabled,
+        "the settings screen must agree"
+    );
+    let commands = fixture.drain_commands();
+    assert!(
+        commands.iter().any(|command| matches!(
+            command,
+            Command::UpdateSettings(settings) if settings.docs.enabled
+        )),
+        "the engine must be told: {commands:?}"
+    );
+    assert!(
+        Settings::load_from(&path).docs.enabled,
+        "the choice survives a restart"
+    );
+
+    fixture.click("Look up docs");
+    assert!(!fixture.app().settings().docs.enabled);
+    assert!(!Settings::load_from(&path).docs.enabled);
+    let _ = std::fs::remove_dir_all(path.parent().unwrap());
+}
+
+#[test]
+fn the_docs_tab_shows_only_the_fields_for_the_chosen_search_service() {
+    let mut fixture = fixture(configured_settings(), None);
+    fixture.click("Settings");
+    fixture.click("Docs");
+
+    // DuckDuckGo is the default: no key or address, but an honest warning.
+    fixture
+        .harness
+        .get_by_label_contains("blocks automated searches");
+    assert!(
+        fixture
+            .harness
+            .query_by_label("Brave Search API key")
+            .is_none()
+    );
+    assert!(fixture.harness.query_by_label("SearXNG address").is_none());
+    fixture
+        .harness
+        .get_by_label_contains("What leaves your computer");
+
+    fixture.click("Search service");
+    fixture.click("Brave Search (API key)");
+    fixture.harness.get_by_label("Brave Search API key");
+    assert!(fixture.harness.query_by_label("SearXNG address").is_none());
+
+    fixture.type_into("Brave Search API key", "brave-key-123");
+    assert_eq!(
+        fixture.app().draft().docs.brave_api_key.expose(),
+        "brave-key-123"
+    );
+
+    fixture.click("Search service");
+    fixture.click("SearXNG (your own server)");
+    fixture.harness.get_by_label("SearXNG address");
+}
+
+#[test]
+fn saving_the_docs_tab_applies_the_choices() {
+    let mut fixture = fixture(configured_settings(), None);
+    fixture.click("Settings");
+    fixture.click("Docs");
+    fixture.click("Look up documentation before answering");
+    fixture.click("Save");
+
+    let commands = fixture.drain_commands();
+    let applied = commands
+        .iter()
+        .find_map(|command| match command {
+            Command::UpdateSettings(settings) => Some(settings),
+            _ => None,
+        })
+        .expect("saving hands settings to the engine");
+    assert!(applied.docs.enabled);
+}
+
+#[test]
+fn test_search_asks_the_engine_with_the_settings_as_edited_and_shows_the_outcome() {
+    let mut fixture = fixture(configured_settings(), None);
+    fixture.click("Settings");
+    fixture.click("Docs");
+    fixture
+        .harness
+        .state_mut()
+        .draft_for_test()
+        .docs
+        .searxng_url = "http://my-searx.example:8080".into();
+    fixture.drain_commands();
+
+    fixture.click("Test search");
+    let commands = fixture.drain_commands();
+    match &commands[..] {
+        [Command::TestDocsSearch(settings)] => {
+            assert_eq!(settings.docs.searxng_url, "http://my-searx.example:8080");
+        }
+        other => panic!("expected one TestDocsSearch, got {other:?}"),
+    }
+
+    fixture
+        .events
+        .send(UiEvent::DocsSearchTested(Ok(
+            "Works: 8 results, the first is \"The Rust Programming Language\".".into(),
+        )))
+        .unwrap();
+    fixture.settle();
+    fixture.harness.get_by_label_contains("Works: 8 results");
+
+    fixture
+        .events
+        .send(UiEvent::DocsSearchTested(Err(
+            "DuckDuckGo asked for a CAPTCHA".into(),
+        )))
+        .unwrap();
+    fixture.settle();
+    fixture.harness.get_by_label_contains("asked for a CAPTCHA");
+    assert!(
+        fixture
+            .harness
+            .query_by_label_contains("Works: 8")
+            .is_none()
+    );
+}
+
+#[test]
+fn the_pages_an_answer_was_based_on_appear_as_links() {
+    let mut fixture = fixture(configured_settings(), None);
+    for event in [
+        UiEvent::StateChanged(VoiceState::LookingUpDocs),
+        UiEvent::Sources {
+            query: "figma auto layout wrap".into(),
+            sources: vec![
+                DocSource {
+                    title: "Guide to auto layout".into(),
+                    url: "https://help.figma.com/hc/en-us/articles/360040451373".into(),
+                },
+                DocSource {
+                    title: "Wrapping".into(),
+                    url: "https://help.figma.com/hc/en-us/articles/1".into(),
+                },
+            ],
+        },
+    ] {
+        fixture.events.send(event).unwrap();
+    }
+    fixture.settle();
+
+    fixture
+        .harness
+        .get_by_label_contains("Looked up the docs for");
+    fixture.harness.get_by_label("Guide to auto layout");
+    fixture.harness.get_by_label("Wrapping");
+
+    let entry = fixture
+        .app()
+        .messages()
+        .iter()
+        .find(|entry| entry.role == ChatRole::Sources)
+        .expect("a sources entry");
+    assert_eq!(entry.links.len(), 2);
+    assert_eq!(
+        entry.links[0].url,
+        "https://help.figma.com/hc/en-us/articles/360040451373"
+    );
+}
+
+#[test]
+fn the_header_says_when_docs_are_being_looked_up() {
+    let mut fixture = fixture(configured_settings(), None);
+    fixture
+        .events
+        .send(UiEvent::StateChanged(VoiceState::LookingUpDocs))
+        .unwrap();
+    fixture.settle();
+    fixture.harness.get_by_label("Looking up docs");
+    // There is a way out while it works.
+    fixture.harness.get_by_label("Stop");
 }

@@ -10,7 +10,7 @@ This is a Rust rewrite of [farzaa/clicky](https://github.com/farzaa/clicky) (MIT
 
 ## Quick start
 
-You need [Rust](https://rustup.rs) 1.88 or newer.
+You need [Rust](https://rustup.rs) 1.95 or newer (the GUI toolkit requires it).
 
 ```bash
 git clone <this repository>
@@ -80,6 +80,32 @@ Typing works with no extra setup. For voice, open **Settings > Voice**:
 - **Push-to-talk**: hold the on-screen button, or hold **Ctrl + Alt/Option** (changeable) in any app. The shortcut only counts after a brief hold, so ordinary shortcuts such as Ctrl+Alt+T do not trigger it.
 - **Voice replies**: ElevenLabs. Off by default; replies always appear as text.
 
+## Looking up the real docs
+
+A model's memory of a program's menus and settings is often out of date or simply wrong. Turn on **Look up docs** (the checkbox under the talk button, or **Settings > Docs**) and Clicky grounds its answer in the software's actual documentation:
+
+1. It asks the model one short question: does this need documentation, and if so, what should I search for? ("Rewrite my essay" does not; "how do I wrap items in Figma?" does.) The model sees the screen you are working in, so it knows which app you mean.
+2. It searches the web, puts documentation sites first (`docs.*`, `help.*`, `/docs/`, Read the Docs, ...), and reads the best pages.
+3. It hands the page text to the model together with your question and tells it to base the steps on the docs. The chat shows which pages were used, as links.
+
+It works with every provider, because the lookup happens in Clicky rather than inside the model. If anything goes wrong (no results, a blocked search, a timeout), Clicky says so and answers from memory instead; it never blocks your answer. It is **off by default**, because it costs one extra short model call and a few seconds, and sends a search query to a third party.
+
+Pick a search service in **Settings > Docs**, and use **Test search** to check it:
+
+| Service | Notes |
+|---|---|
+| DuckDuckGo | No setup, but best effort: DuckDuckGo answers automated searches from some networks with a CAPTCHA (it did on the network I tested from). Clicky detects this and tells you. |
+| Brave Search | Reliable. Needs an API key (there is a free tier): [brave.com/search/api](https://brave.com/search/api), or set `BRAVE_API_KEY`. |
+| SearXNG | A server you run yourself, with the `json` format enabled under `search.formats` in its `settings.yml`. Public instances do not allow this. |
+
+What leaves your computer when it is on:
+
+- A **short search query** goes to the search service. The model writes it from your question and screen, so Clicky filters it first: web addresses, e-mail addresses, long numbers, file paths and search operators are removed.
+- The **pages are downloaded straight from their websites** by your computer, then their text goes to **your AI provider** with your question.
+- Page text is **untrusted**. It is fenced off with a random marker and the model is told never to follow instructions found in it. That reduces, but cannot eliminate, the risk of a malicious page influencing an answer, so do not treat a documented command as safe just because it appears in the excerpt.
+
+Because Clicky fetches pages from *your* machine, it only reads `https://` pages on public internet addresses. It refuses `localhost`, private and link-local addresses (including cloud metadata addresses), internal-looking names, odd ports and URLs with credentials, re-checks every redirect, and drops DNS answers that point at private addresses (behind an HTTP proxy the proxy does the lookup, so that last check cannot apply, though the others still do). This also means documentation on your own network (a company wiki on a private address) is not read.
+
 ## Pointing
 
 When the model decides pointing would help, it appends a coordinate tag. Clicky maps it to the right monitor and flies a blue cursor from your mouse to the target, shows a short label, then flies back. Turn it off in **General** if you prefer.
@@ -88,8 +114,8 @@ When the model decides pointing would help, it appends a coordinate tag. Clicky 
 
 Be aware of these; they are the honest edges of the current version.
 
-- **Verified**: everything builds, lints clean and passes 142 tests on Linux, and the Windows target (`x86_64-pc-windows-gnu`) compiles. The app was driven for real under X11 (typing, streaming replies, the pointer flight, settings). The provider clients were tested against mock servers and, where no key is needed, live endpoints (OpenRouter and OpenCode Zen model lists, AssemblyAI's TLS handshake and bad-key handling).
-- **Not verified**: I had no API keys, microphone, speakers or Windows/macOS machine, so real chat replies from each provider, real microphone capture, ElevenLabs audio, and running on Windows or macOS are untested. macOS was not compiled at all. Please report what breaks.
+- **Verified**: everything builds, lints clean and passes 209 tests on Linux, and the Windows target (`x86_64-pc-windows-gnu`) compiles. The app was driven for real under X11 (typing, streaming replies, the pointer flight, settings). The provider clients were tested against mock servers and, where no key is needed, live endpoints (OpenRouter and OpenCode Zen model lists, AssemblyAI's TLS handshake and bad-key handling). For the docs lookup, page fetching and text extraction were run against live pages (Figma's help center, the Rust Book, GitHub Docs), and the request-safety checks were tested against local mock servers, including redirects into an internal service.
+- **Not verified**: a successful Brave Search, and DuckDuckGo from a network that is not challenged (from mine DuckDuckGo only served a CAPTCHA, so its result parser was tested on markup shaped like the real page, not on a live one). I had no API keys, microphone, speakers or Windows/macOS machine, so real chat replies from each provider, real microphone capture, ElevenLabs audio, and running on Windows or macOS are untested. macOS was not compiled at all. Please report what breaks.
 - **The pointer overlay needs a compositing desktop** (every Windows and macOS desktop, most Linux desktops). Without compositing, the overlay window cannot be transparent. Turn the overlay off in **General** in that case.
 - **The pointer overlay and global shortcut need X11 on Linux.** Wayland does not let apps position windows or read global keys; use the on-screen button there. (XWayland sessions work.)
 - **Keep the Clicky window open** (behind other windows is fine). A minimized window may stop processing events on some systems, so replies and pointing would not appear until you restore it.
@@ -100,6 +126,8 @@ Be aware of these; they are the honest edges of the current version.
 - Clicky's own window is visible in the screenshots it takes.
 
 ## Privacy and security
+
+(See also *What leaves your computer* under *Looking up the real docs*.)
 
 Compared with the original app, these were removed because they were not needed to use it:
 
