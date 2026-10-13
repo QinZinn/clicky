@@ -2,6 +2,9 @@
 name = "clicky"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "An AI buddy that sees your screen, talks, and points. Desktop app for Windows, macOS and Linux."
+license = "MIT"
 
 [lints.clippy]
 # Tests build a Settings from Default and then tweak a field or two; that reads

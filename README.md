@@ -1,162 +1,128 @@
-Update: April 27, 2026.
+# Clicky
 
-Hi there! I'm Farza, the guy that made Clicky.
+An AI buddy that lives on your desktop. It can **see your screen, talk, and point at things**, like having a patient teacher sitting next to you.
 
-The existing codebase remains open source. Tinker with it, make it yours, start a company out of it, do whatever you want I don't mind. But, for all the new stuff I'm hacking on, gonna keep it private. To get the latest Clicky, you can go [here](https://www.heyclicky.com/).
+Ask a question by typing, or hold a shortcut and talk. Clicky looks at your screen, answers (in the window and, if you want, out loud), and when it helps it flies a blue cursor to the exact button or menu you need.
 
-I also tweeted about this [here](https://x.com/FarzaTV/status/2043402737828962489).
+![Clicky demo (the original macOS version)](clicky-demo.gif)
 
-Go crazy with this repo!! It's an MIT license.
+This is a Rust rewrite of [farzaa/clicky](https://github.com/farzaa/clicky) (MIT). It is now a normal window app that runs on **Windows, macOS and Linux**, works with **many AI providers**, and has **no account, proxy or telemetry**: it talks straight to the provider you pick, with your own API key.
 
-# Hi, this is Clicky.
-It's an AI teacher that lives as a buddy next to your cursor. It can see your screen, talk to you, and even point at stuff. Kinda like having a real teacher next to you.
+## Quick start
 
-Download it [here](https://www.clicky.so/) for free.
-
-Here's the [original tweet](https://x.com/FarzaTV/status/2041314633978659092) that kinda blew up for a demo for more context.
-
-![Clicky — an ai buddy that lives on your mac](clicky-demo.gif)
-
-This is the open-source version of Clicky for those that want to hack on it, build their own features, or just see how it works under the hood.
-
-## Get started with Claude Code
-
-The fastest way to get this running is with [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
-
-Once you get Claude running, paste this:
-
-```
-Hi Claude.
-
-Clone https://github.com/farzaa/clicky.git into my current directory.
-
-Then read the CLAUDE.md. I want to get Clicky running locally on my Mac.
-
-Help me set up everything — the Cloudflare Worker with my own API keys, the proxy URLs, and getting it building in Xcode. Walk me through it.
-```
-
-That's it. It'll clone the repo, read the docs, and walk you through the whole setup. Once you're running you can just keep talking to it — build features, fix bugs, whatever. Go crazy.
-
-## Manual setup
-
-If you want to do it yourself, here's the deal.
-
-### Prerequisites
-
-- macOS 14.2+ (for ScreenCaptureKit)
-- Xcode 15+
-- Node.js 18+ (for the Cloudflare Worker)
-- A [Cloudflare](https://cloudflare.com) account (free tier works)
-- API keys for: [Anthropic](https://console.anthropic.com), [AssemblyAI](https://www.assemblyai.com), [ElevenLabs](https://elevenlabs.io)
-
-### 1. Set up the Cloudflare Worker
-
-The Worker is a tiny proxy that holds your API keys. The app talks to the Worker, the Worker talks to the APIs. This way your keys never ship in the app binary.
+You need [Rust](https://rustup.rs) 1.88 or newer.
 
 ```bash
-cd worker
-npm install
+git clone <this repository>
+cd clicky
+cargo run --release
 ```
 
-Now add your secrets. Wrangler will prompt you to paste each one:
+On first launch Clicky opens **Settings**: pick a provider, paste its API key, press **Save**, then type a question. That is all you need. Voice is optional (see below).
+
+Just want to look around without a key? Run the fake provider and point Clicky at it:
 
 ```bash
-npx wrangler secret put ANTHROPIC_API_KEY
-npx wrangler secret put ASSEMBLYAI_API_KEY
-npx wrangler secret put ELEVENLABS_API_KEY
+cargo run --example mock_provider      # in a second terminal
 ```
 
-For the ElevenLabs voice ID, open `wrangler.toml` and set it there (it's not sensitive):
+Then choose **Custom (OpenAI-compatible)** with base URL `http://127.0.0.1:8787/v1` (any key, any model). Its replies point at a spot on your screen so you can watch the whole pipeline work.
 
-```toml
-[vars]
-ELEVENLABS_VOICE_ID = "your-voice-id-here"
-```
+### Linux build dependencies
 
-Deploy it:
+On Ubuntu/Debian (built and tested on 24.04):
 
 ```bash
-npx wrangler deploy
+sudo apt install libasound2-dev libx11-dev libxcb-randr0-dev libxcb-shm0-dev libxcb-xfixes0-dev \
+  libxcb-shape0-dev libxkbcommon-dev libdbus-1-dev libpipewire-0.3-dev libgbm-dev libwayland-dev \
+  libegl1-mesa-dev libgl1-mesa-dev clang cmake pkg-config
 ```
 
-It'll give you a URL like `https://your-worker-name.your-subdomain.workers.dev`. Copy that.
+Windows and macOS need the Rust toolchain. The first build also compiles a TLS library (`aws-lc`), which may need `cmake` and a C compiler on your platform; I could only build on Linux, so check that library's build notes if it fails elsewhere.
 
-### 2. Run the Worker locally (for development)
+## AI providers
 
-If you want to test changes to the Worker without deploying:
+Choose one in **Settings > AI model**. Everything except the key and model is pre-filled, and **Refresh models** fetches the provider's live model list.
+
+| Provider | Notes |
+|---|---|
+| Anthropic (Claude) | Messages API. |
+| OpenAI | Chat completions. |
+| OpenRouter | One key, hundreds of models. The refreshed list shows which accept images. |
+| OpenCode Zen | Models are routed to the right endpoint automatically (Claude and some Qwen models use the messages API, GPT/Grok/Muse use the responses API, the rest chat completions). Needs a paid Zen key: its free-tier models only work inside the OpenCode app and answer other clients with HTTP 403. Gemini models on Zen use Google's native API, which Clicky does not speak; use the Gemini or OpenRouter provider for those. |
+| DeepSeek | Chat completions. |
+| Google Gemini | Through Google's OpenAI-compatible endpoint. |
+| Groq | Chat completions. |
+| Ollama / LM Studio | Local servers, no key needed. Nothing leaves your machine. |
+| Custom | Any server that implements `/chat/completions` (xAI, Mistral, Together, vLLM, ...). |
+
+- **Screenshots** are sent with each question by default. Turn that off for text-only models. If a model refuses images anyway, Clicky retries once without them and tells you.
+- Model names change often. If a default is out of date, type another or use **Refresh models**.
+- Reasoning models can spend your whole reply budget on thinking and return nothing; raise *Maximum reply length* in **General** if that happens.
+
+### Keys
+
+Keys are stored in the settings file, which is created readable by you only on Linux/macOS:
+
+| OS | Location |
+|---|---|
+| Linux | `~/.config/clicky/config.json` |
+| macOS | `~/Library/Application Support/clicky/config.json` |
+| Windows | `%APPDATA%\clicky\config\config.json` |
+
+Set `CLICKY_CONFIG_DIR` to use another folder. You can keep keys out of the file entirely with environment variables: `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `OPENROUTER_API_KEY`, `OPENCODE_API_KEY`, `DEEPSEEK_API_KEY`, `GEMINI_API_KEY`, `GROQ_API_KEY`, `CLICKY_CUSTOM_API_KEY`, `ASSEMBLYAI_API_KEY`, `ELEVENLABS_API_KEY`. A key typed into Settings wins over the environment.
+
+## Voice
+
+Typing works with no extra setup. For voice, open **Settings > Voice**:
+
+- **Speech input**: AssemblyAI (words appear live while you talk) or any OpenAI-compatible transcription endpoint (OpenAI Whisper, Groq, ...), uploaded when you let go.
+- **Push-to-talk**: hold the on-screen button, or hold **Ctrl + Alt/Option** (changeable) in any app. The shortcut only counts after a brief hold, so ordinary shortcuts such as Ctrl+Alt+T do not trigger it.
+- **Voice replies**: ElevenLabs. Off by default; replies always appear as text.
+
+## Pointing
+
+When the model decides pointing would help, it appends a coordinate tag. Clicky maps it to the right monitor and flies a blue cursor from your mouse to the target, shows a short label, then flies back. Turn it off in **General** if you prefer.
+
+## Platform notes and limits
+
+Be aware of these; they are the honest edges of the current version.
+
+- **Verified**: everything builds, lints clean and passes 142 tests on Linux, and the Windows target (`x86_64-pc-windows-gnu`) compiles. The app was driven for real under X11 (typing, streaming replies, the pointer flight, settings). The provider clients were tested against mock servers and, where no key is needed, live endpoints (OpenRouter and OpenCode Zen model lists, AssemblyAI's TLS handshake and bad-key handling).
+- **Not verified**: I had no API keys, microphone, speakers or Windows/macOS machine, so real chat replies from each provider, real microphone capture, ElevenLabs audio, and running on Windows or macOS are untested. macOS was not compiled at all. Please report what breaks.
+- **The pointer overlay needs a compositing desktop** (every Windows and macOS desktop, most Linux desktops). Without compositing, the overlay window cannot be transparent. Turn the overlay off in **General** in that case.
+- **The pointer overlay and global shortcut need X11 on Linux.** Wayland does not let apps position windows or read global keys; use the on-screen button there. (XWayland sessions work.)
+- **Keep the Clicky window open** (behind other windows is fine). A minimized window may stop processing events on some systems, so replies and pointing would not appear until you restore it.
+- On **macOS**, allow *Screen Recording* (for screenshots), *Microphone*, and *Input Monitoring* (for the global shortcut) for the app or terminal that runs Clicky.
+- On setups with monitors of **different display scaling**, the pointer can land slightly off; it is exact for a single scale.
+- The AssemblyAI websocket does not use HTTP proxy settings. Behind a proxy, use the OpenAI-compatible upload option for speech.
+- The always-visible blue cursor from the macOS version (which followed your mouse) is not ported; the cursor appears only when it points.
+- Clicky's own window is visible in the screenshots it takes.
+
+## Privacy and security
+
+Compared with the original app, these were removed because they were not needed to use it:
+
+- The **Cloudflare Worker proxy**. It had no authentication, so anyone who found its URL could spend the owner's Anthropic, ElevenLabs and AssemblyAI credit. Clicky now calls providers directly with *your* keys.
+- **Analytics** that sent every question and every answer to PostHog, **email collection**, the **auto-update feed** that pointed at someone else's repository, the **onboarding video stream and music**, the **camera entitlement**, and the hard-coded third-party endpoints.
+
+What Clicky does now:
+
+- Screenshots and questions go only to the provider you chose (and your voice only to the speech service you chose). Screenshots are taken only when you ask something, and responses requests set `store: false`.
+- API keys are redacted from debug output and the settings file is owner-only on Unix. Tests check that provider, speech and voice errors do not echo the key.
+- The settings screen warns if a base URL would send your key over plain `http://` to a remote host (local servers are fine).
+- TLS uses the operating system's certificate store.
+
+## Development
+
+See [AGENTS.md](AGENTS.md) for the architecture, file map and conventions.
 
 ```bash
-cd worker
-npx wrangler dev
+cargo test                                                              # no display needed
+xvfb-run -a cargo test --test display_integration -- --test-threads=1   # real X11 screen capture + hotkey
+cargo clippy --all-targets
 ```
 
-This starts a local server (usually `http://localhost:8787`) that behaves exactly like the deployed Worker. You'll need to create a `.dev.vars` file in the `worker/` directory with your keys:
+## License
 
-```
-ANTHROPIC_API_KEY=sk-ant-...
-ASSEMBLYAI_API_KEY=...
-ELEVENLABS_API_KEY=...
-ELEVENLABS_VOICE_ID=...
-```
-
-Then update the proxy URLs in the Swift code to point to `http://localhost:8787` instead of the deployed Worker URL while developing. Grep for `clicky-proxy` to find them all.
-
-### 3. Update the proxy URLs in the app
-
-The app has the Worker URL hardcoded in a few places. Search for `your-worker-name.your-subdomain.workers.dev` and replace it with your Worker URL:
-
-```bash
-grep -r "clicky-proxy" leanring-buddy/
-```
-
-You'll find it in:
-- `CompanionManager.swift` — Claude chat + ElevenLabs TTS
-- `AssemblyAIStreamingTranscriptionProvider.swift` — AssemblyAI token endpoint
-
-### 4. Open in Xcode and run
-
-```bash
-open leanring-buddy.xcodeproj
-```
-
-In Xcode:
-1. Select the `leanring-buddy` scheme (yes, the typo is intentional, long story)
-2. Set your signing team under Signing & Capabilities
-3. Hit **Cmd + R** to build and run
-
-The app will appear in your menu bar (not the dock). Click the icon to open the panel, grant the permissions it asks for, and you're good.
-
-### Permissions the app needs
-
-- **Microphone** — for push-to-talk voice capture
-- **Accessibility** — for the global keyboard shortcut (Control + Option)
-- **Screen Recording** — for taking screenshots when you use the hotkey
-- **Screen Content** — for ScreenCaptureKit access
-
-## Architecture
-
-If you want the full technical breakdown, read `CLAUDE.md`. But here's the short version:
-
-**Menu bar app** (no dock icon) with two `NSPanel` windows — one for the control panel dropdown, one for the full-screen transparent cursor overlay. Push-to-talk streams audio over a websocket to AssemblyAI, sends the transcript + screenshot to Claude via streaming SSE, and plays the response through ElevenLabs TTS. Claude can embed `[POINT:x,y:label:screenN]` tags in its responses to make the cursor fly to specific UI elements across multiple monitors. All three APIs are proxied through a Cloudflare Worker.
-
-## Project structure
-
-```
-leanring-buddy/          # Swift source (yes, the typo stays)
-  CompanionManager.swift    # Central state machine
-  CompanionPanelView.swift  # Menu bar panel UI
-  ClaudeAPI.swift           # Claude streaming client
-  ElevenLabsTTSClient.swift # Text-to-speech playback
-  OverlayWindow.swift       # Blue cursor overlay
-  AssemblyAI*.swift         # Real-time transcription
-  BuddyDictation*.swift     # Push-to-talk pipeline
-worker/                  # Cloudflare Worker proxy
-  src/index.ts              # Three routes: /chat, /tts, /transcribe-token
-CLAUDE.md                # Full architecture doc (agents read this)
-```
-
-## Contributing
-
-PRs welcome. If you're using Claude Code, it already knows the codebase — just tell it what you want to build and point it at `CLAUDE.md`.
-
-Got feedback? DM me on X [@farzatv](https://x.com/farzatv).
+MIT. Original Clicky by [Farza](https://github.com/farzaa/clicky).
