@@ -1,0 +1,40 @@
+[package]
+name = "clicky"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+description = "An AI buddy that sees your screen, talks, and points. Desktop app for Windows, macOS and Linux."
+license = "MIT"
+
+[lints.clippy]
+# Tests build a Settings from Default and then tweak a field or two; that reads
+# better than a struct literal full of `..Default::default()`.
+field_reassign_with_default = "allow"
+
+[dependencies]
+anyhow = "1.0.104"
+base64 = "0.23.1"
+cpal = "0.18.2"
+device_query = "4.0.1"
+directories = "6.0.0"
+eframe = { version = "0.36.2", default-features = false, features = ["default_fonts", "glow", "x11", "wayland", "accesskit", "links"] }
+futures-util = "0.3.34"
+image = { version = "0.25.10", default-features = false, features = ["jpeg"] }
+regex = "1.13.1"
+reqwest = { version = "0.13.5", default-features = false, features = ["json", "stream", "rustls", "multipart"] }
+rodio = { version = "0.23.0", default-features = false, features = ["playback", "mp3"] }
+scraper = "0.27.0"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "io-util"] }
+tokio-tungstenite = { version = "0.30.0", features = ["rustls-tls-native-roots"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = "2.5.8"
+xcap = "0.9.8"
+
+[dev-dependencies]
+axum = "0.8.9"
+egui_kittest = "0.36.2"
+tokio = { version = "1.53.2", features = ["test-util"] }

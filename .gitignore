@@ -1,8 +1,9 @@
-worker/node_modules/
-worker/.dev.vars
+# Rust
+target/
+
+# OS
 .DS_Store
-*.xcuserstate
-build/
-releases/
+
+# Local tooling
 .claude/
 coding-plans/
